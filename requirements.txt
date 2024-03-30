@@ -1,0 +1,9 @@
+deeplake==3.8.18
+jiwer==3.0.3
+numpy==1.22.3
+openai_whisper==20230918
+pandas==1.2.5
+torch==2.0.1
+torchaudio==2.0.2
+transformers==4.35.2
+deeplake[audio]
