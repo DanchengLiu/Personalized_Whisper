@@ -68,8 +68,13 @@ for directory in os.listdir(ds_root):
         label = accent_mapping[directory]
         for item in os.listdir(os.path.join(ds_root,directory,'wav')):
             if item.endswith('.wav'):
+                f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
+                transcript = f.read()
+                f.close()
+
                 all_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
-                                 'accent':label})
+                                 'accent':label,
+                                 'transcript': transcript})
 print(len(all_data))
 
 device = 'cuda:0'
@@ -77,36 +82,38 @@ class MyDataset(Dataset):
     def __init__(self, raw_data, transform=None):
         self.data = []
         self.targets = []
-        #self.transcription = []
+        self.transcription = []
         for datapoint in raw_data:
             self.data.append(datapoint['audio'])
             self.targets.append(datapoint['accent'])
-            #self.transcription.append(datapoint['texts'])
+            self.transcription.append(datapoint['transcript'])
         #self.transform = transform
         
     def __getitem__(self, index):
         x,sr = librosa.load(self.data[index],sr=44100)
-        x = librosa.util.fix_length(x,size=sr*3)
-        x = librosa.feature.melspectrogram(y=x, sr = sr, n_mels=80)
+        x_s = librosa.resample(x,orig_sr = 44100,target_sr=16000)
+        #x = librosa.util.fix_length(x,size=sr*3)
+        #x = librosa.feature.melspectrogram(y=x, sr = sr, n_mels=80)
         # for 2d conv
-        x = np.expand_dims(x,axis=0)
+        #x = np.expand_dims(x,axis=0)
         d = self.targets[index]
+        t = self.transcription[index]
         #trans = self.transcription[index]
         
-        return x, d
+        return x_s, d, t
     def __len__(self):
         return len(self.data)
     
 dataset = MyDataset(all_data)
 
 train_d, test_d = random_split(dataset,[0.8,0.2])
-TRAIN = DataLoader(train_d, batch_size=4,drop_last=True,shuffle=True)
-TEST = DataLoader(test_d, batch_size=4,drop_last=True,shuffle=True)
+TRAIN = DataLoader(train_d, batch_size=1,drop_last=True,shuffle=True)
+TEST = DataLoader(test_d, batch_size=1,drop_last=True,shuffle=True)
 
 print("-----------------------START DATA PROCESSING-----------------------")
 
 
-
+'''
 EPOCH=30
 
 print("----------------------MODEL START--------------------")
@@ -135,12 +142,12 @@ class Net(nn.Module):
         self.fc1 = nn.Linear(10240, 512)
         self.fc2 = nn.Linear(512, 64)
         self.fc3 = nn.Linear(64, 6)
-        '''
-        self.lstm = nn.LSTM(1,1024,3)
-        self.fc1 = nn.Linear(1024,256)
-        self.fc2 = nn.Linear(256,64)
-        self.fc3 = nn.Linear(64, 8)
-        '''
+        
+        #self.lstm = nn.LSTM(1,1024,3)
+        #self.fc1 = nn.Linear(1024,256)
+        #self.fc2 = nn.Linear(256,64)
+        #self.fc3 = nn.Linear(64, 8)
+        
         
     def forward(self, x):
         
@@ -166,18 +173,18 @@ class Net(nn.Module):
         x = self.pool(x)
         
         #print(x.shape)
-        '''
+        
         #x = model.encoder(x)
         #print(x.shape)
         #x = self.pool(x)
         #print(x.shape)
-        x, _ = self.lstm(x)
-        x = x[:,-1,:]
+        #x, _ = self.lstm(x)
+        #x = x[:,-1,:]
         #x = torch.flatten(x, 1) # flatten all dimensions except batch
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        '''
+        #x = F.relu(self.fc1(x))
+        #x = F.relu(self.fc2(x))
+        #x = self.fc3(x)
+        
         x = torch.flatten(x, 1) # flatten all dimensions except batch
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
@@ -265,9 +272,9 @@ with torch.no_grad():
         correct += (predicted == labels).sum().item()
 
 print(f'Accuracy of the network on the test: {100 * correct // total} %')
-
 '''
-MODEL = "openai/whisper-small.en"
+
+MODEL = "openai/whisper-tiny.en"
 device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 
 #model = WhisperForConditionalGeneration.from_pretrained(MODEL, local_files_only=True)
@@ -284,14 +291,18 @@ def preprocess(data):
 
 
 wer_scores = []
-for i in testloader:
-    
-    input_features = processor(i['audios'].squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+for data in TEST:
+    inputs, labels, text = data
+    #print(text)
+    #print(inputs.shape)
+    #inputs = inputs.to(device)
+    #labels = labels.to(device)    
+    input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
     generated_ids = model.generate(input_features)
     generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    wer_ = wer(normalizer(generated_test_text), normalizer(i['texts'][0].lower()))
+    wer_ = wer(normalizer(generated_test_text), normalizer(text[0].lower()))
     wer_scores.append(wer_)
-    print(str(i['dialects'])+'\t\t'+i['texts'][0]+'\t\t'+generated_test_text+'\t\t'+str(wer_))
+    print(str(labels)+'\t\t'+text[0]+'\t\t'+generated_test_text+'\t\t'+str(wer_))
+    
 print(sum(wer_scores)/len(wer_scores))
 
-'''
