@@ -62,20 +62,39 @@ accent_mapping = {
 
 print(accent_mapping)
 
-all_data = []
+import random
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+set_seed(42)
+
+train_data = []
+test_data = []
 for directory in os.listdir(ds_root):
     if directory in accent_mapping.keys():
         label = accent_mapping[directory]
         for item in os.listdir(os.path.join(ds_root,directory,'wav')):
-            if item.endswith('.wav'):
+            if item.endswith('.wav') and 'b' in item:
                 f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
                 transcript = f.read()
                 f.close()
 
-                all_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
+                test_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
                                  'accent':label,
                                  'transcript': transcript})
-print(len(all_data))
+            elif item.endswith('.wav'):
+                f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
+                transcript = f.read()
+                f.close()
+
+                train_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
+                                 'accent':label,
+                                 'transcript': transcript})                
+print(len(train_data))
+print(len(test_data))
 
 device = 'cuda:0'
 
@@ -121,9 +140,10 @@ class MyDataset(Dataset):
     def __len__(self):
         return len(self.data)
     
-dataset = MyDataset(all_data)
-
-train_d, test_d = random_split(dataset,[0.8,0.2])
+train_d = MyDataset(train_data)
+test_d = MyDataset(test_data)
+#_,test_d = random_split(test_d,[0.9,0.1])
+#train_d, test_d = random_split(dataset,[0.8,0.2])
 TRAIN = DataLoader(train_d, batch_size=32,drop_last=True,shuffle=True)
 TEST = DataLoader(test_d, batch_size=32,drop_last=True,shuffle=True)
 
@@ -287,10 +307,11 @@ training_args = Seq2SeqTrainingArguments(
     output_dir="./model/lora",  # change to a repo name of your choice
     per_device_train_batch_size=8,
     gradient_accumulation_steps=1,  # increase by 2x for every 2x decrease in batch size
-    learning_rate=1e-3,
+    learning_rate=1e-4,
     warmup_steps=50,
     num_train_epochs=3,
     evaluation_strategy="steps",
+    save_strategy="epoch"，
     fp16=True,
     per_device_eval_batch_size=8,
     generation_max_length=128,
