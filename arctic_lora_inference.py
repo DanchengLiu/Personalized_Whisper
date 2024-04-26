@@ -24,7 +24,7 @@ normalizer = EnglishTextNormalizer()
 #ds = hub.load("hub://activeloop/timit-train",access_method='download')
 
 
-ds_root = '/projects/jialing/DeepLearning/Personalized_Whisper/dataset'
+ds_root = './data/l2arctic_release_v5'
 
 #Arabic: 0
 #Chinese: 1
@@ -77,12 +77,17 @@ for directory in os.listdir(ds_root):
                                  'transcript': transcript})
 print(len(all_data))
 
-device = 'cuda:7'
+device = 'cuda:1'
+
+
+
 class MyDataset(Dataset):
-    def __init__(self, raw_data, transform=None):
+    def __init__(self, raw_data, transform=None, model_name = "openai/whisper-tiny.en"):
         self.data = []
         self.targets = []
         self.transcription = []
+        self.MODEL = model_name
+        self.processor = WhisperProcessor.from_pretrained(self.MODEL)
         for datapoint in raw_data:
             self.data.append(datapoint['audio'])
             self.targets.append(datapoint['accent'])
@@ -94,13 +99,22 @@ class MyDataset(Dataset):
         x_s = librosa.resample(x,orig_sr = 44100,target_sr=16000)
         #x = librosa.util.fix_length(x,size=sr*3)
         #x = librosa.feature.melspectrogram(y=x, sr = sr, n_mels=80)
+        
+        x_s = self.processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features
+        x_3s = x_s[:,:,:300]
+
         # for 2d conv
         #x = np.expand_dims(x,axis=0)
+        
         d = self.targets[index]
         t = self.transcription[index]
+        #t = self.processor.tokenizer(t+'<|endoftext|>', return_tensors="pt").input_ids
+        #t = self.processor.tokenizer.pad(t, return_tensors="pt")
+        #print(t)
+        #aaa
         #trans = self.transcription[index]
         
-        return x_s, d, t
+        return x_3s, x_s.squeeze(), d, t
     def __len__(self):
         return len(self.data)
     
@@ -113,8 +127,9 @@ TEST = DataLoader(test_d, batch_size=1,drop_last=True,shuffle=True)
 print("-----------------------START DATA PROCESSING-----------------------")
 
 
-'''
-EPOCH=30
+
+
+
 
 print("----------------------MODEL START--------------------")
 import torch.nn as nn
@@ -139,7 +154,7 @@ class Net(nn.Module):
         self.conv8 = nn.Conv2d(128, 128, 3,padding=1)
         
         #self.avgpool = nn.AvgPool1d(128)
-        self.fc1 = nn.Linear(10240, 512)
+        self.fc1 = nn.Linear(11520, 512)
         self.fc2 = nn.Linear(512, 64)
         self.fc3 = nn.Linear(64, 6)
         
@@ -197,103 +212,53 @@ print(sum(p.numel() for p in net.parameters() if p.requires_grad))
 print(net)
 net.to(device)
 
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(net.parameters(), lr=1e-4)
-
-
-for epoch in range(EPOCH):
-    running_loss = 0.0
-    for i, data in enumerate(TRAIN, 0):
-        # get the inputs; data is a list of [inputs, labels]
-        inputs, labels = data
-        
-
-        inputs = inputs.to(device)
-        #print(inputs.shape)
-        labels = labels.to(device)
-        #print(labels)
-        # zero the parameter gradients
-        optimizer.zero_grad()
-
-        # forward + backward + optimize
-        #outputs = net(model.encoder(inputs))
-        outputs = net(inputs)
-        #print(outputs.data.shape)
-        #print(labels)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-
-        # print statistics
-        running_loss += loss.item()
-    print(f'Running loss of the network on the train: {running_loss}')
-    running_loss=0.0
-    correct = 0
-    total = 0
-    # since we're not training, we don't need to calculate the gradients for our outputs
-    with torch.no_grad():
-        for data in TEST:
-            inputs, labels = data
-            
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-            # calculate outputs by running images through the network
-            #outputs = net(model.encoder(images))
-            outputs = net(inputs)
-            # the class with the highest energy is what we choose as prediction
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            
-
-            correct += (predicted == labels).sum().item()
-
-    print(f'Accuracy of the network on the test: {100 * correct // total} %')
-
-print('Finished Training')
-
-
-correct = 0
-total = 0
-# since we're not training, we don't need to calculate the gradients for our outputs
-with torch.no_grad():
-    for data in TEST:
-        inputs, labels = data
-        
-        inputs = inputs.to(device)
-        labels = labels.to(device)
-        # calculate outputs by running images through the network
-        outputs = net(inputs)
-        # the class with the highest energy is what we choose as prediction
-        _, predicted = torch.max(outputs.data, 1)
-        total += labels.size(0)
-        
-        print(predicted)
-
-        correct += (predicted == labels).sum().item()
-
-print(f'Accuracy of the network on the test: {100 * correct // total} %')
-'''
-
-MODEL = "openai/whisper-tiny.en"
-device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
 #model = WhisperForConditionalGeneration.from_pretrained(MODEL, local_files_only=True)
-model = WhisperForConditionalGeneration.from_pretrained(MODEL)
-model.to(device)
+
+
+
+
+import torch
+
+from transformers import (
+    AutomaticSpeechRecognitionPipeline,
+    WhisperForConditionalGeneration,
+    WhisperTokenizer,
+    WhisperProcessor,
+)
+from peft import PeftModel, PeftConfig
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+peft_model_id = "model/lora/checkpoint-500" # Use the same model ID as before.
+peft_config = PeftConfig.from_pretrained(peft_model_id)
+model = WhisperForConditionalGeneration.from_pretrained(
+    peft_config.base_model_name_or_path, load_in_8bit=True, device_map="auto"
+)
+
+model = PeftModel.from_pretrained(model, peft_model_id)
+MODEL = "openai/whisper-tiny.en"
 processor = WhisperProcessor.from_pretrained(MODEL)
 
-def preprocess(data):
-    processed_data = {}
-    processed_data['input_features'] = processor(data["audio"]["array"], sampling_rate=16_000, return_tensors="pt").input_features.to(device)
-    processed_data['decoder_input_ids'] = processor.tokenizer('<|startoftranscript|>'+data['text'].lower(),return_tensors='pt').input_ids.to(device)
-    processed_data['labels'] = processor.tokenizer(data['text'].lower()+'<|endoftext|>',return_tensors='pt').input_ids.to(device)
-    return processed_data
 
+
+set_seed(42)
 
 wer_scores = []
 for data in TEST:
-    inputs, labels, text = data
-    input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+    inputs_3s, input_features, labels, text = data
+    input_features = input_features.half().to(device)
+    #print(text)
+    #print(inputs.shape)
+    #inputs = inputs.to(device)
+    #labels = labels.to(device)    
+    #input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
     generated_ids = model.generate(input_features)
     generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
     wer_ = wer(normalizer(generated_test_text), normalizer(text[0].lower()))
@@ -301,3 +266,4 @@ for data in TEST:
     print(str(labels)+'\t\t'+text[0]+'\t\t'+generated_test_text+'\t\t'+str(wer_))
     
 print(sum(wer_scores)/len(wer_scores))
+
