@@ -79,10 +79,12 @@ print(len(all_data))
 
 device = 'cuda:0'
 class MyDataset(Dataset):
-    def __init__(self, raw_data, transform=None):
+    def __init__(self, raw_data, transform=None, model_name = "openai/whisper-tiny.en"):
         self.data = []
         self.targets = []
         self.transcription = []
+        self.MODEL = model_name
+        self.processor = WhisperProcessor.from_pretrained(self.MODEL)
         for datapoint in raw_data:
             self.data.append(datapoint['audio'])
             self.targets.append(datapoint['accent'])
@@ -94,28 +96,35 @@ class MyDataset(Dataset):
         x_s = librosa.resample(x,orig_sr = 44100,target_sr=16000)
         #x = librosa.util.fix_length(x,size=sr*3)
         #x = librosa.feature.melspectrogram(y=x, sr = sr, n_mels=80)
+        
+        x_s = self.processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features
+        x_3s = x_s[:,:,:300]
+
         # for 2d conv
         #x = np.expand_dims(x,axis=0)
+        
         d = self.targets[index]
         t = self.transcription[index]
         #trans = self.transcription[index]
         
-        return x_s, d, t
+        return x_3s, x_s.squeeze(), d, t
     def __len__(self):
         return len(self.data)
     
 dataset = MyDataset(all_data)
 
 train_d, test_d = random_split(dataset,[0.8,0.2])
-TRAIN = DataLoader(train_d, batch_size=1,drop_last=True,shuffle=True)
-TEST = DataLoader(test_d, batch_size=1,drop_last=True,shuffle=True)
+TRAIN = DataLoader(train_d, batch_size=32,drop_last=True,shuffle=True)
+TEST = DataLoader(test_d, batch_size=32,drop_last=True,shuffle=True)
 
 print("-----------------------START DATA PROCESSING-----------------------")
 
 
-'''
-EPOCH=30
 
+EPOCH=20
+
+train_loss_trace = []
+test_acc_trace = []
 print("----------------------MODEL START--------------------")
 import torch.nn as nn
 import torch.nn.functional as F
@@ -139,7 +148,7 @@ class Net(nn.Module):
         self.conv8 = nn.Conv2d(128, 128, 3,padding=1)
         
         #self.avgpool = nn.AvgPool1d(128)
-        self.fc1 = nn.Linear(10240, 512)
+        self.fc1 = nn.Linear(11520, 512)
         self.fc2 = nn.Linear(512, 64)
         self.fc3 = nn.Linear(64, 6)
         
@@ -205,7 +214,7 @@ for epoch in range(EPOCH):
     running_loss = 0.0
     for i, data in enumerate(TRAIN, 0):
         # get the inputs; data is a list of [inputs, labels]
-        inputs, labels = data
+        inputs, _, labels, trans = data
         
 
         inputs = inputs.to(device)
@@ -227,13 +236,14 @@ for epoch in range(EPOCH):
         # print statistics
         running_loss += loss.item()
     print(f'Running loss of the network on the train: {running_loss}')
+    train_loss_trace.append(running_loss)
     running_loss=0.0
     correct = 0
     total = 0
     # since we're not training, we don't need to calculate the gradients for our outputs
     with torch.no_grad():
         for data in TEST:
-            inputs, labels = data
+            inputs, _, labels, trans = data
             
             inputs = inputs.to(device)
             labels = labels.to(device)
@@ -248,16 +258,22 @@ for epoch in range(EPOCH):
             correct += (predicted == labels).sum().item()
 
     print(f'Accuracy of the network on the test: {100 * correct // total} %')
-
+    test_acc_trace.append(100 * correct // total)
 print('Finished Training')
-
+print('training loss curve is:')
+print(train_loss_trace)
+print('test acc curve is:')
+print(test_acc_trace)
+print('Saving weights')
+PATH_CLASSIFIER = './model/classifier.pt'
+torch.save(net.state_dict(), PATH_CLASSIFIER)
 
 correct = 0
 total = 0
 # since we're not training, we don't need to calculate the gradients for our outputs
 with torch.no_grad():
     for data in TEST:
-        inputs, labels = data
+        inputs, _, labels, trans = data
         
         inputs = inputs.to(device)
         labels = labels.to(device)
@@ -272,9 +288,10 @@ with torch.no_grad():
         correct += (predicted == labels).sum().item()
 
 print(f'Accuracy of the network on the test: {100 * correct // total} %')
-'''
+
 
 MODEL = "openai/whisper-tiny.en"
+
 device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 
 #model = WhisperForConditionalGeneration.from_pretrained(MODEL, local_files_only=True)
@@ -292,12 +309,13 @@ def preprocess(data):
 
 wer_scores = []
 for data in TEST:
-    inputs, labels, text = data
+    inputs_3s, input_features, labels, text = data
+    input_features = input_features.to(device)
     #print(text)
     #print(inputs.shape)
     #inputs = inputs.to(device)
     #labels = labels.to(device)    
-    input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+    #input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
     generated_ids = model.generate(input_features)
     generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
     wer_ = wer(normalizer(generated_test_text), normalizer(text[0].lower()))
