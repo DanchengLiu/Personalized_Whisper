@@ -230,7 +230,7 @@ from peft import PeftModel, PeftConfig
 
 
 
-peft_model_id = "model/lora/checkpoint-500" # Use the same model ID as before.
+peft_model_id = "model/lora/checkpoint-1000" # Use the same model ID as before.
 peft_config = PeftConfig.from_pretrained(peft_model_id)
 model = WhisperForConditionalGeneration.from_pretrained(
     peft_config.base_model_name_or_path, load_in_8bit=True, device_map="auto"
