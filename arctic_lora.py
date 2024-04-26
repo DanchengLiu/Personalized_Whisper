@@ -304,7 +304,7 @@ model.print_trainable_parameters()
 from transformers import Seq2SeqTrainingArguments
 
 training_args = Seq2SeqTrainingArguments(
-    output_dir="./model/lora",  # change to a repo name of your choice
+    output_dir="./model/lora/base",  # change to a repo name of your choice
     per_device_train_batch_size=8,
     gradient_accumulation_steps=1,  # increase by 2x for every 2x decrease in batch size
     learning_rate=1e-4,
@@ -358,20 +358,5 @@ trainer.train()
 
 
 
-wer_scores = []
-for data in TEST:
-    inputs_3s, input_features, labels, text = data
-    input_features = input_features.to(device)
-    #print(text)
-    #print(inputs.shape)
-    #inputs = inputs.to(device)
-    #labels = labels.to(device)    
-    #input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
-    generated_ids = model.generate(input_features)
-    generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    wer_ = wer(normalizer(generated_test_text), normalizer(text[0].lower()))
-    wer_scores.append(wer_)
-    print(str(labels)+'\t\t'+text[0]+'\t\t'+generated_test_text+'\t\t'+str(wer_))
-    
-print(sum(wer_scores)/len(wer_scores))
+
 

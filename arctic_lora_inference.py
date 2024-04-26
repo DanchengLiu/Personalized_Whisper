@@ -62,20 +62,39 @@ accent_mapping = {
 
 print(accent_mapping)
 
-all_data = []
+import random
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+set_seed(42)
+
+train_data = []
+test_data = []
 for directory in os.listdir(ds_root):
     if directory in accent_mapping.keys():
         label = accent_mapping[directory]
         for item in os.listdir(os.path.join(ds_root,directory,'wav')):
-            if item.endswith('.wav'):
+            if item.endswith('.wav') and 'b' in item:
                 f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
                 transcript = f.read()
                 f.close()
 
-                all_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
+                test_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
                                  'accent':label,
                                  'transcript': transcript})
-print(len(all_data))
+            elif item.endswith('.wav'):
+                f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
+                transcript = f.read()
+                f.close()
+
+                train_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
+                                 'accent':label,
+                                 'transcript': transcript})                
+print(len(train_data))
+print(len(test_data))
 
 device = 'cuda:1'
 
@@ -118,9 +137,10 @@ class MyDataset(Dataset):
     def __len__(self):
         return len(self.data)
     
-dataset = MyDataset(all_data)
-
-train_d, test_d = random_split(dataset,[0.8,0.2])
+#dataset = MyDataset(all_data)
+train_d = MyDataset(train_data)
+test_d = MyDataset(test_data)
+#train_d, test_d = random_split(dataset,[0.8,0.2])
 TRAIN = DataLoader(train_d, batch_size=1,drop_last=True,shuffle=True)
 TEST = DataLoader(test_d, batch_size=1,drop_last=True,shuffle=True)
 
@@ -230,7 +250,7 @@ from peft import PeftModel, PeftConfig
 
 
 
-peft_model_id = "model/lora/checkpoint-1000" # Use the same model ID as before.
+peft_model_id = "model/lora/base/checkpoint-445" # Use the same model ID as before.
 peft_config = PeftConfig.from_pretrained(peft_model_id)
 model = WhisperForConditionalGeneration.from_pretrained(
     peft_config.base_model_name_or_path, load_in_8bit=True, device_map="auto"
@@ -253,7 +273,7 @@ for data in TEST:
     #input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
     generated_ids = model.generate(input_features)
     generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    wer_ = wer(normalizer(generated_test_text), normalizer(text[0].lower()))
+    wer_ = wer(normalizer(text[0].lower()), normalizer(generated_test_text))
     wer_scores.append(wer_)
     print(str(labels)+'\t\t'+text[0]+'\t\t'+generated_test_text+'\t\t'+str(wer_))
     
