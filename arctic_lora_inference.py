@@ -2,31 +2,35 @@ import os
 os.environ["DEEPLAKE_DOWNLOAD_PATH"]='./data'
 import shutil
 import numpy as np
+import time
 
-
+from tqdm import tqdm
 import torch
 import pandas as pd
 import whisper
 import torchaudio
 from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.data import Dataset, random_split
-
+from collections import defaultdict
 from transformers import WhisperForConditionalGeneration, WhisperFeatureExtractor,WhisperTokenizer, WhisperConfig, WhisperProcessor
 #import deeplake
 from jiwer import wer
 from whisper.normalizers import EnglishTextNormalizer
 import librosa
 #import hub
-
+import pdb
+from transformers import (
+    AutomaticSpeechRecognitionPipeline,
+    WhisperForConditionalGeneration,
+    WhisperTokenizer,
+    WhisperProcessor,
+)
+from peft import PeftModel, PeftConfig
 normalizer = EnglishTextNormalizer()
 
-#ds = deeplake.dataset("hub://activeloop/timit-train")
-#ds = hub.load("hub://activeloop/timit-train",access_method='download')
+ds_root = '/projects/jialing/DeepLearning/Personalized_Whisper/dataset'
 
-
-ds_root = './data/l2arctic_release_v5'
-
-#Arabic: 0
+#Arabic: 0a
 #Chinese: 1
 #Hindi: 2
 #Korean: 3
@@ -62,21 +66,43 @@ accent_mapping = {
 
 print(accent_mapping)
 
-all_data = []
+import random
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+set_seed(42)
+
+data_by_dialect = []
+train_data = []
+test_data = []
 for directory in os.listdir(ds_root):
     if directory in accent_mapping.keys():
         label = accent_mapping[directory]
         for item in os.listdir(os.path.join(ds_root,directory,'wav')):
-            if item.endswith('.wav'):
+            if item.endswith('.wav') and 'b' in item:
                 f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
                 transcript = f.read()
                 f.close()
 
-                all_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
+                test_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
                                  'accent':label,
                                  'transcript': transcript})
-print(len(all_data))
-
+                data_by_dialect.append({'audio':os.path.join(ds_root,directory,'wav',item),
+                                 'accent':label,
+                                 'transcript': transcript})
+            elif item.endswith('.wav'):
+                f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
+                transcript = f.read()
+                f.close()
+                train_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
+                                 'accent':label,
+                                 'transcript': transcript})
+                data_by_dialect.append({'audio':os.path.join(ds_root,directory,'wav',item),
+                                 'accent':label,
+                                 'transcript': transcript})
 device = 'cuda:1'
 
 
@@ -108,25 +134,22 @@ class MyDataset(Dataset):
         
         d = self.targets[index]
         t = self.transcription[index]
-        #t = self.processor.tokenizer(t+'<|endoftext|>', return_tensors="pt").input_ids
+        t1 = self.processor.tokenizer(t+'<|endoftext|>').input_ids
         #t = self.processor.tokenizer.pad(t, return_tensors="pt")
         #print(t)
         #aaa
         #trans = self.transcription[index]
-        
+        # pdb.set_trace()
         return x_3s, x_s.squeeze(), d, t
+        # return {'3second':x_3s,
+        #         'input_features':x_s.squeeze(), 
+        #         'dialect':d, 
+        #         'labels':t}
     def __len__(self):
         return len(self.data)
-    
-dataset = MyDataset(all_data)
 
-train_d, test_d = random_split(dataset,[0.8,0.2])
-TRAIN = DataLoader(train_d, batch_size=1,drop_last=True,shuffle=True)
-TEST = DataLoader(test_d, batch_size=1,drop_last=True,shuffle=True)
 
 print("-----------------------START DATA PROCESSING-----------------------")
-
-
 
 
 
@@ -207,36 +230,38 @@ class Net(nn.Module):
         return x
 
 
+dialect_to_checkpoint = {
+    '0': 'model/lora/dialect_0/checkpoint-114',
+    '1': 'model/lora/dialect_1/checkpoint-114',
+    '2': 'model/lora/dialect_2/checkpoint-114',
+    '3': 'model/lora/dialect_3/checkpoint-114',
+    '4': 'model/lora/dialect_4/checkpoint-114',
+    '5': 'model/lora/dialect_5/checkpoint-114'   
+}
+
 net = Net()
 print(sum(p.numel() for p in net.parameters() if p.requires_grad))
 print(net)
+net.load_state_dict(torch.load('./classifier.pt'))
+
 net.to(device)
+net.eval()
+MODEL = "openai/whisper-tiny.en"
 
+processor = WhisperProcessor.from_pretrained(MODEL)
 
-#model = WhisperForConditionalGeneration.from_pretrained(MODEL, local_files_only=True)
+def preprocess(data):
+    processed_data = {}
+    processed_data['input_features'] = processor(data["audio"]["array"], sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+    processed_data['decoder_input_ids'] = processor.tokenizer('<|startoftranscript|>'+data['text'].lower(),return_tensors='pt').input_ids.to(device)
+    processed_data['labels'] = processor.tokenizer(data['text'].lower()+'<|endoftext|>',return_tensors='pt').input_ids.to(device)
+    return processed_data
 
+test_d = MyDataset(test_data)
+TEST = DataLoader(test_d, batch_size=20, drop_last=True, shuffle=True)
 
-
-
-import torch
-
-from transformers import (
-    AutomaticSpeechRecognitionPipeline,
-    WhisperForConditionalGeneration,
-    WhisperTokenizer,
-    WhisperProcessor,
-)
-from peft import PeftModel, PeftConfig
-
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-peft_model_id = "model/lora/checkpoint-500" # Use the same model ID as before.
+wer_scores = []
+peft_model_id = "/projects/jialing/DeepLearning/Personalized_Whisper/model/baseline/checkpoint-669"
 peft_config = PeftConfig.from_pretrained(peft_model_id)
 model = WhisperForConditionalGeneration.from_pretrained(
     peft_config.base_model_name_or_path, load_in_8bit=True, device_map="auto"
@@ -247,23 +272,83 @@ MODEL = "openai/whisper-tiny.en"
 processor = WhisperProcessor.from_pretrained(MODEL)
 
 
+# Measure average inference time
+# inference_times = []
 
-set_seed(42)
-
-wer_scores = []
-for data in TEST:
-    inputs_3s, input_features, labels, text = data
-    input_features = input_features.half().to(device)
-    #print(text)
-    #print(inputs.shape)
-    #inputs = inputs.to(device)
-    #labels = labels.to(device)    
-    #input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
-    generated_ids = model.generate(input_features)
-    generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    wer_ = wer(normalizer(generated_test_text), normalizer(text[0].lower()))
-    wer_scores.append(wer_)
-    print(str(labels)+'\t\t'+text[0]+'\t\t'+generated_test_text+'\t\t'+str(wer_))
+# for data in tqdm(TEST, desc="Evaluating model"):
+#     start_time = time.time()  # Start timing
     
-print(sum(wer_scores)/len(wer_scores))
+#     inputs_3s, input_features, labels, text = data
+#     classifier_output = net(inputs_3s.to(device))
+#     max_indices = torch.argmax(classifier_output, dim=1)
 
+#     input_features = input_features.half().to(device)
+#     generated_ids = model.generate(input_features)
+#     generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    
+#     wer_ = wer(normalizer(text[0].lower()), normalizer(generated_test_text))
+#     wer_scores.append(wer_)
+
+#     # Record and calculate inference time
+#     end_time = time.time()
+#     inference_time = end_time - start_time
+#     inference_times.append(inference_time)
+    
+# average_inference_time = sum(inference_times) / len(inference_times)
+# print(f"Average inference time per batch: {average_inference_time:.4f} seconds")
+# print(f"Average WER: {sum(wer_scores) / len(wer_scores):.4f}")
+
+# Dictionary to hold preloaded models
+preloaded_models = {}
+
+# Preload all necessary models
+for dialect, checkpoint in dialect_to_checkpoint.items():
+    peft_config = PeftConfig.from_pretrained(checkpoint)
+    model = WhisperForConditionalGeneration.from_pretrained(
+        peft_config.base_model_name_or_path, load_in_8bit=True, device_map="auto"
+    )
+    preloaded_models[dialect] = PeftModel.from_pretrained(model, checkpoint)
+
+print("All models loaded successfully.")
+
+
+wer_scores = {}  # Dictionary to store cumulative WER for each label
+count = {}       # Dictionary to count occurrences of each label
+inference_times = []
+for index, data in enumerate(tqdm(TEST, desc="Processing batches")):
+    inputs_3s, input_features, labels, text = data
+    classifier_output = net(inputs_3s.to(device))
+    max_indices = torch.argmax(classifier_output, dim=1)  # Get max index for each item in the batch
+
+    for i, max_index in enumerate(max_indices):
+        dialect_key = str(max_index.item())
+        model = preloaded_models[dialect_key]
+
+        # Handling input features per item if necessary
+        current_input_features = input_features[i].half().to(device)
+        generated_ids = model.generate(current_input_features.unsqueeze(0))
+        generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+        # Compute WER and update statistics
+        wer_ = wer(normalizer(text[i].lower()), normalizer(generated_test_text))
+        label_id = labels[i].item()  # Get label for current item
+
+        if label_id not in wer_scores:
+            wer_scores[label_id] = 0
+            count[label_id] = 0
+        wer_scores[label_id] += wer_
+        count[label_id] += 1
+        end_time = time.time()
+        inference_time = end_time - start_time
+        inference_times.append(inference_time)
+
+average_inference_time = sum(inference_times) / len(inference_times)
+print(f"Average inference time per batch: {average_inference_time:.4f} seconds")
+
+        # Optionally print each result (might clutter the tqdm progress bar)
+        # print(f"Label {labels[i]}:\tText: {text[i]}\tGenerated Text: {generated_test_text}\tWER: {wer_}")
+
+# After loop, calculate averages
+for label_id in wer_scores:
+    average_wer = wer_scores[label_id] / count[label_id]
+    print(f'Average WER for label {label_id}: {average_wer}')

@@ -60,27 +60,71 @@ accent_mapping = {
     'THV':5,
     'TLV':5
 }
-
+dialect_list= [0,1,2,3,4,5]
 
 print(accent_mapping)
 
 device = 'cuda:7'
 # Segment data by dialect
+# data_by_dialect = []
+# train_data = []
+# test_data = []
+# # train_data = defaultdict(list)
+# # test_data = defaultdict(list)
+# for directory in os.listdir(ds_root):
+#     if directory in accent_mapping.keys():
+#         label = accent_mapping[directory]
+#         for item in os.listdir(os.path.join(ds_root,directory,'wav')):
+#             if item.endswith('.wav') and 'b' in item:
+#                 f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
+#                 transcript = f.read()
+#                 f.close()
+
+#                 test_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
+#                                  'accent':label,
+#                                  'transcript': transcript})
+#                 data_by_dialect.append({'audio':os.path.join(ds_root,directory,'wav',item),
+#                                  'accent':label,
+#                                  'transcript': transcript})
+#             elif item.endswith('.wav'):
+#                 f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
+#                 transcript = f.read()
+#                 f.close()
+#                 train_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
+#                                  'accent':label,
+#                                  'transcript': transcript})
+#                 data_by_dialect.append({'audio':os.path.join(ds_root,directory,'wav',item),
+#                                  'accent':label,
+#                                  'transcript': transcript})
+
 data_by_dialect = defaultdict(list)
+train_data = defaultdict(list)
+test_data = defaultdict(list)
 for directory in os.listdir(ds_root):
     if directory in accent_mapping.keys():
         label = accent_mapping[directory]
         for item in os.listdir(os.path.join(ds_root,directory,'wav')):
-            if item.endswith('.wav'):
+            if item.endswith('.wav') and 'b' in item:
                 f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
                 transcript = f.read()
                 f.close()
 
+                test_data[label].append({'audio':os.path.join(ds_root,directory,'wav',item),
+                                 'accent':label,
+                                 'transcript': transcript})
                 data_by_dialect[label].append({'audio':os.path.join(ds_root,directory,'wav',item),
                                  'accent':label,
                                  'transcript': transcript})
-                # pdb.set_trace()
-
+            elif item.endswith('.wav'):
+                f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
+                transcript = f.read()
+                f.close()
+                train_data[label].append({'audio':os.path.join(ds_root,directory,'wav',item),
+                                 'accent':label,
+                                 'transcript': transcript})
+                data_by_dialect[label].append({'audio':os.path.join(ds_root,directory,'wav',item),
+                                 'accent':label,
+                                 'transcript': transcript})
 
 
 class MyDataset(Dataset):
@@ -113,11 +157,6 @@ class MyDataset(Dataset):
     def __len__(self):
         return len(self.data)
     
-# dataset = MyDataset(all_data)
-
-# train_d, test_d = random_split(dataset,[0.8,0.2])
-# TRAIN = DataLoader(train_d, batch_size=32,drop_last=True,shuffle=True)
-# TEST = DataLoader(test_d, batch_size=32,drop_last=True,shuffle=True)
 
 print("-----------------------START DATA PROCESSING-----------------------")
 
@@ -256,13 +295,63 @@ def set_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+set_seed(42)
+# # for dialect, data in data_by_dialect.items():
+# train_dataset = MyDataset(train_data)
+# test_dataset = MyDataset(test_data)
 
-for dialect, data in data_by_dialect.items():
-    set_seed(42)
-    dataset = MyDataset(data)
-    train_size = int(0.8 * len(dataset))
-    test_size = len(dataset) - train_size
-    train_d, test_d = random_split(dataset, [train_size, test_size])
+# model = WhisperForConditionalGeneration.from_pretrained(MODEL)
+# model = prepare_model_for_kbit_training(model)
+# def make_inputs_require_grad(module, input, output):
+#     output.requires_grad_(True)
+
+# model.model.encoder.conv1.register_forward_hook(make_inputs_require_grad)
+# from peft import LoraConfig, PeftModel, LoraModel, LoraConfig, get_peft_model
+
+# config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
+
+# model = get_peft_model(model, config)
+# model.print_trainable_parameters()
+
+
+# training_args = Seq2SeqTrainingArguments(
+#     output_dir=f"./model/baseline",
+#     per_device_train_batch_size=8,
+#     gradient_accumulation_steps=1, 
+#     learning_rate=1e-4,
+#     warmup_steps=50,
+#     num_train_epochs=3,
+#     evaluation_strategy="steps",
+#     save_strategy="epoch",
+#     fp16=True,
+#     per_device_eval_batch_size=8,
+#     generation_max_length=128,
+#     logging_steps=100,
+#     remove_unused_columns=False,  
+#     label_names=["labels"]
+# )
+
+
+
+
+# trainer = Seq2SeqTrainer(
+#     args=training_args,
+#     model=model,
+#     train_dataset=train_dataset,
+#     eval_dataset=test_dataset,
+#     data_collator=data_collator,
+#     tokenizer=processor.feature_extractor,
+#     callbacks=[SavePeftModelCallback],
+# )
+# model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
+# trainer.train()
+
+
+for dialect, data in train_data.items():
+    # pdb.set_trace()
+    # Create dataset objects for each dialect
+    train_dataset = MyDataset(train_data[dialect])
+    test_dataset = MyDataset(test_data[dialect])
 
     model = WhisperForConditionalGeneration.from_pretrained(MODEL)
     model = prepare_model_for_kbit_training(model)
@@ -279,13 +368,14 @@ for dialect, data in data_by_dialect.items():
 
 
     training_args = Seq2SeqTrainingArguments(
-        output_dir=f"./model/lora/dialect_{dialect}",
+        output_dir=f"./model/lora_5e4/dialect_{dialect}",
         per_device_train_batch_size=8,
         gradient_accumulation_steps=1, 
-        learning_rate=1e-3,
+        learning_rate=5e-4,
         warmup_steps=50,
         num_train_epochs=3,
         evaluation_strategy="steps",
+        save_strategy="epoch",
         fp16=True,
         per_device_eval_batch_size=8,
         generation_max_length=128,
@@ -300,13 +390,11 @@ for dialect, data in data_by_dialect.items():
     trainer = Seq2SeqTrainer(
         args=training_args,
         model=model,
-        train_dataset=train_d,
-        eval_dataset=test_d,
+        train_dataset=train_dataset,
+        eval_dataset=test_dataset,
         data_collator=data_collator,
         tokenizer=processor.feature_extractor,
         callbacks=[SavePeftModelCallback],
     )
     model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
     trainer.train()
-
-
