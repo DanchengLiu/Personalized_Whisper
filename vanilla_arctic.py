@@ -1,8 +1,9 @@
 import os
 os.environ["DEEPLAKE_DOWNLOAD_PATH"]='./data'
+os.environ["CUDA_VISIBLE_DEVICES"]='2'
 import shutil
 import numpy as np
-
+from tqdm import tqdm
 
 import torch
 import pandas as pd
@@ -59,8 +60,35 @@ accent_mapping = {
     'TLV':5
 }
 
+gender_mapping = { # M:0, F:1
+ 'ABA': 0,
+ 'SKA': 1,
+ 'YBAA': 0,
+ 'ZHAA': 1,
+ 'BWC': 0,
+ 'LXC': 1,
+ 'NCC': 1,
+ 'TXHC': 0,
+ 'ASI': 0,
+ 'RRBI': 0,
+ 'SVBI': 1,
+ 'TNI': 1,
+ 'HJK': 1,
+ 'HKK': 0,
+ 'YDCK': 1,
+ 'YKWK': 0,
+ 'EBVS': 0,
+ 'ERMS': 0,
+ 'MBMPS': 1,
+ 'NJS': 1,
+ 'HQTV': 0,
+ 'PNV': 1,
+ 'THV': 1,
+ 'TLV': 0
+}
 
 print(accent_mapping)
+
 import random
 def set_seed(seed):
     random.seed(seed)
@@ -71,18 +99,31 @@ def set_seed(seed):
 set_seed(42)
 
 train_data = []
+val_data=[]
 test_data = []
 for directory in os.listdir(ds_root):
-    if directory in accent_mapping.keys():
-        label = accent_mapping[directory]
+    if directory in gender_mapping.keys():
+        gender = gender_mapping[directory]
+        accent = accent_mapping[directory]
         for item in os.listdir(os.path.join(ds_root,directory,'wav')):
-            if item.endswith('.wav') and 'b' in item:
+            if item.endswith('.wav') and ('b01' in item or 'b00' in item):
+                f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
+                transcript = f.read()
+                f.close()
+
+                val_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
+                                 'accent':accent,
+                                 'gender': gender,
+                                 'transcript': transcript})
+     
+            elif item.endswith('.wav') and 'b' in item:
                 f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
                 transcript = f.read()
                 f.close()
 
                 test_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
-                                 'accent':label,
+                                 'accent':accent,
+                                 'gender': gender,
                                  'transcript': transcript})
             elif item.endswith('.wav'):
                 f = open(os.path.join(ds_root,directory,'transcript',item.split('.wav')[0]+'.txt'))
@@ -90,9 +131,12 @@ for directory in os.listdir(ds_root):
                 f.close()
 
                 train_data.append({'audio':os.path.join(ds_root,directory,'wav',item),
-                                 'accent':label,
-                                 'transcript': transcript})                
+                                 'accent':accent,
+                                 'gender': gender,
+                                 'transcript': transcript})              
+      
 print(len(train_data))
+print(len(val_data))
 print(len(test_data))
 
 device = 'cuda:0'
@@ -111,13 +155,14 @@ class MyDataset(Dataset):
         
     def __getitem__(self, index):
         x,sr = librosa.load(self.data[index],sr=44100)
-        x_s = librosa.resample(x,orig_sr = 44100,target_sr=16000)
+        x_s = torch.tensor(librosa.resample(x,orig_sr = 44100,target_sr=16000))
+        x_s=whisper.pad_or_trim(x_s.flatten()).to(device)
+        x_s = whisper.log_mel_spectrogram(x_s)
         #x = librosa.util.fix_length(x,size=sr*3)
-        #x = librosa.feature.melspectrogram(y=x, sr = sr, n_mels=80)
-        
-        x_s = self.processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features
-        x_3s = x_s[:,:,:300]
-
+        #x_s = librosa.feature.melspectrogram(y=x, sr = sr, n_mels=80)
+        #x_s = np.expand_dims(x_s,0)
+        #x_3s = torch.tensor(x_s[:,:,:300]).to(device)
+        x_3s = torch.unsqueeze(x_s[:,:300],0)
         # for 2d conv
         #x = np.expand_dims(x,axis=0)
         
@@ -125,23 +170,25 @@ class MyDataset(Dataset):
         t = self.transcription[index]
         #trans = self.transcription[index]
         
-        return x_3s, x_s.squeeze(), d, t
+        return x_3s,x_s,d,t#x_3s, x_s.squeeze(), d, t
     def __len__(self):
         return len(self.data)
     
 train_d = MyDataset(train_data)
+val_d = MyDataset(val_data)
 test_d = MyDataset(test_data)
+
 #train_d, test_d = random_split(dataset,[0.8,0.2])
-TRAIN = DataLoader(train_d, batch_size=32,drop_last=True,shuffle=True)
-TEST = DataLoader(test_d, batch_size=32,drop_last=True,shuffle=True)
+TRAIN = DataLoader(train_d, batch_size=256,drop_last=True,shuffle=True)
+VAL = DataLoader(val_d, batch_size=256,drop_last=True,shuffle=True)
+TEST = DataLoader(test_d, batch_size=256,drop_last=True,shuffle=True)
 
 print("-----------------------START DATA PROCESSING-----------------------")
 
 
-EPOCH=20
+EPOCH=10
 
-train_loss_trace = []
-test_acc_trace = []
+
 print("----------------------MODEL START--------------------")
 import torch.nn as nn
 import torch.nn.functional as F
@@ -154,19 +201,27 @@ class Net(nn.Module):
         self.conv1 = nn.Conv2d(1, 16, 3,padding=1)
         self.conv2 = nn.Conv2d(16, 16, 3,padding=1)
         self.pool = nn.AvgPool2d(2)
+        self.batchnorm1 = nn.BatchNorm2d(16)
         self.conv3 = nn.Conv2d(16, 32, 3,padding=1)
         self.conv4 = nn.Conv2d(32, 32, 3,padding=1)
-        
+        self.batchnorm2 = nn.BatchNorm2d(32)
         self.conv5 = nn.Conv2d(32, 64, 3,padding=1)
-
         self.conv6 = nn.Conv2d(64, 64, 3,padding=1)
+        self.batchnorm3 = nn.BatchNorm2d(64)
         self.conv7 = nn.Conv2d(64, 128, 3,padding=1)
-        
         self.conv8 = nn.Conv2d(128, 128, 3,padding=1)
-        
+        self.batchnorm4 = nn.BatchNorm2d(128)
+        self.conv9 = nn.Conv2d(128, 256, 3,padding=1)
+        self.conv10 = nn.Conv2d(256, 256, 3,padding=1)
+        self.batchnorm5 = nn.BatchNorm2d(256)
+        #self.conv11 = nn.Conv2d(256, 256, 3,padding=1)
+        #self.conv12 = nn.Conv2d(256, 256, 3,padding=1)
+        #self.batchnorm6 = nn.BatchNorm2d(512)
         #self.avgpool = nn.AvgPool1d(128)
-        self.fc1 = nn.Linear(11520, 512)
-        self.fc2 = nn.Linear(512, 64)
+        #self.fc1 = nn.Linear(4608, 512)
+        #self.fc1 = nn.Linear(2304, 256)
+        self.fc1 = nn.Linear(4608, 256)
+        self.fc2 = nn.Linear(256, 64)
         self.fc3 = nn.Linear(64, 6)
         
         #self.lstm = nn.LSTM(1,1024,3)
@@ -178,26 +233,35 @@ class Net(nn.Module):
     def forward(self, x):
         
         x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        
+        x = self.conv2(x)
+        x = F.relu(self.batchnorm1(x))
         x = self.pool(x)
         
         x = F.relu(self.conv3(x))
-        x = F.relu(self.conv4(x))
-        
+        x = self.conv4(x)
+        x = F.relu(self.batchnorm2(x))
         x = self.pool(x)
         
         x = F.relu(self.conv5(x))
-
-        x = F.relu(self.conv6(x))
+        x = self.conv6(x)
+        x = F.relu(self.batchnorm3(x))
         x = self.pool(x)
         
         x = F.relu(self.conv7(x))
-        
-        x = F.relu(self.conv8(x))
-
+        x = self.conv8(x)
+        x = F.relu(self.batchnorm4(x))
         x = self.pool(x)
-        
+
+        x = F.relu(self.conv9(x))
+        x = self.conv10(x)
+        x = F.relu(self.batchnorm5(x))
+        x = self.pool(x)
+
+        #x = F.relu(self.conv11(x))
+        #x = self.conv12(x)
+        #x = F.relu(self.batchnorm6(x))
+        #x = self.pool(x)
+                        
         #print(x.shape)
         
         #x = model.encoder(x)
@@ -212,6 +276,7 @@ class Net(nn.Module):
         #x = self.fc3(x)
         
         x = torch.flatten(x, 1) # flatten all dimensions except batch
+        #print(x.shape)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
@@ -227,14 +292,20 @@ criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(net.parameters(), lr=1e-4)
 
 
+train_loss_trace = []
+val_acc_trace = []
+processor = WhisperProcessor.from_pretrained("openai/whisper-tiny.en")
 for epoch in range(EPOCH):
     running_loss = 0.0
-    for i, data in enumerate(TRAIN, 0):
+    for i, data in tqdm(enumerate(TRAIN, 0)):
         # get the inputs; data is a list of [inputs, labels]
+        #x_s,labels,trans = data
+        #x_s = processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+        #inputs = x_s[:,:,:300]
         inputs, _, labels, trans = data
         
-
-        inputs = inputs.to(device)
+        
+        inputs = inputs
         #print(inputs.shape)
         labels = labels.to(device)
         #print(labels)
@@ -243,7 +314,9 @@ for epoch in range(EPOCH):
 
         # forward + backward + optimize
         #outputs = net(model.encoder(inputs))
+
         outputs = net(inputs)
+        
         #print(outputs.data.shape)
         #print(labels)
         loss = criterion(outputs, labels)
@@ -259,10 +332,12 @@ for epoch in range(EPOCH):
     total = 0
     # since we're not training, we don't need to calculate the gradients for our outputs
     with torch.no_grad():
-        for data in TEST:
+        for data in VAL:
             inputs, _, labels, trans = data
-            
-            inputs = inputs.to(device)
+            #x_s,labels,trans = data
+            #x_s = processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+            #inputs = x_s[:,:,:300]            
+            inputs = inputs
             labels = labels.to(device)
             # calculate outputs by running images through the network
             #outputs = net(model.encoder(images))
@@ -274,15 +349,15 @@ for epoch in range(EPOCH):
 
             correct += (predicted == labels).sum().item()
 
-    print(f'Accuracy of the network on the test: {100 * correct // total} %')
-    test_acc_trace.append(100 * correct // total)
+    print(f'Accuracy of the network on the val: {100 * correct // total} %')
+    val_acc_trace.append(100 * correct // total)
 print('Finished Training')
 print('training loss curve is:')
 print(train_loss_trace)
-print('test acc curve is:')
-print(test_acc_trace)
+print('val acc curve is:')
+print(val_acc_trace)
 print('Saving weights')
-PATH_CLASSIFIER = './model/classifier.pt'
+PATH_CLASSIFIER = './model/classifier_12layer.pt'
 torch.save(net.state_dict(), PATH_CLASSIFIER)
 
 correct = 0
@@ -291,8 +366,10 @@ total = 0
 with torch.no_grad():
     for data in TEST:
         inputs, _, labels, trans = data
-        
-        inputs = inputs.to(device)
+        #x_s,labels,trans = data
+        #x_s = processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+        #inputs = x_s[:,:,:300]        
+        inputs = inputs
         labels = labels.to(device)
         # calculate outputs by running images through the network
         outputs = net(inputs)
@@ -300,44 +377,15 @@ with torch.no_grad():
         _, predicted = torch.max(outputs.data, 1)
         total += labels.size(0)
         
-        print(predicted)
+        #print(predicted)
 
         correct += (predicted == labels).sum().item()
 
 print(f'Accuracy of the network on the test: {100 * correct // total} %')
 
 
-MODEL = "openai/whisper-tiny.en"
-
-device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
-
-#model = WhisperForConditionalGeneration.from_pretrained(MODEL, local_files_only=True)
-model = WhisperForConditionalGeneration.from_pretrained(MODEL)
-model.to(device)
-processor = WhisperProcessor.from_pretrained(MODEL)
-
-def preprocess(data):
-    processed_data = {}
-    processed_data['input_features'] = processor(data["audio"]["array"], sampling_rate=16_000, return_tensors="pt").input_features.to(device)
-    processed_data['decoder_input_ids'] = processor.tokenizer('<|startoftranscript|>'+data['text'].lower(),return_tensors='pt').input_ids.to(device)
-    processed_data['labels'] = processor.tokenizer(data['text'].lower()+'<|endoftext|>',return_tensors='pt').input_ids.to(device)
-    return processed_data
 
 
-wer_scores = []
-for data in TEST:
-    inputs_3s, input_features, labels, text = data
-    input_features = input_features.to(device)
-    #print(text)
-    #print(inputs.shape)
-    #inputs = inputs.to(device)
-    #labels = labels.to(device)    
-    #input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
-    generated_ids = model.generate(input_features)
-    generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    wer_ = wer(normalizer(generated_test_text), normalizer(text[0].lower()))
-    wer_scores.append(wer_)
-    print(str(labels)+'\t\t'+text[0]+'\t\t'+generated_test_text+'\t\t'+str(wer_))
-    
-print(sum(wer_scores)/len(wer_scores))
+
+
 

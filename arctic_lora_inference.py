@@ -1,5 +1,8 @@
 import os
 os.environ["DEEPLAKE_DOWNLOAD_PATH"]='./data'
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import shutil
 import numpy as np
 
@@ -96,7 +99,7 @@ for directory in os.listdir(ds_root):
 print(len(train_data))
 print(len(test_data))
 
-device = 'cuda:1'
+device = 'cuda'
 
 
 
@@ -250,19 +253,23 @@ from peft import PeftModel, PeftConfig
 
 
 
-peft_model_id = "model/lora/base/checkpoint-445" # Use the same model ID as before.
+peft_model_id = "model/lora/base5e-4/checkpoint-890" # Use the same model ID as before.
 peft_config = PeftConfig.from_pretrained(peft_model_id)
 model = WhisperForConditionalGeneration.from_pretrained(
     peft_config.base_model_name_or_path, load_in_8bit=True, device_map="auto"
 )
-
+from peft import prepare_model_for_kbit_training
 model = PeftModel.from_pretrained(model, peft_model_id)
+#model = prepare_model_for_kbit_training(model)
 MODEL = "openai/whisper-tiny.en"
 processor = WhisperProcessor.from_pretrained(MODEL)
 
 
+import time
 
+total_time = 0.0
 wer_scores = []
+start_time = time.time()
 for data in TEST:
     inputs_3s, input_features, labels, text = data
     input_features = input_features.half().to(device)
@@ -271,11 +278,20 @@ for data in TEST:
     #inputs = inputs.to(device)
     #labels = labels.to(device)    
     #input_features = processor(inputs.squeeze(), sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+    
+    #inputs_3s = inputs_3s.to(device)
+    #outputs = net(inputs_3s)
+    
+    
+    
     generated_ids = model.generate(input_features)
     generated_test_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
     wer_ = wer(normalizer(text[0].lower()), normalizer(generated_test_text))
     wer_scores.append(wer_)
-    print(str(labels)+'\t\t'+text[0]+'\t\t'+generated_test_text+'\t\t'+str(wer_))
+    #print(str(labels)+'\t\t'+text[0]+'\t\t'+generated_test_text+'\t\t'+str(wer_))
     
 print(sum(wer_scores)/len(wer_scores))
-
+end_time = time.time()
+total_time+=end_time-start_time
+print('-------------------------------------------------------------')
+print(total_time)

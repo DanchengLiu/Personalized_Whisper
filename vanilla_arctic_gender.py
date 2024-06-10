@@ -1,8 +1,9 @@
 import os
 os.environ["DEEPLAKE_DOWNLOAD_PATH"]='./data'
+os.environ["CUDA_VISIBLE_DEVICES"]='2'
 import shutil
 import numpy as np
-
+from tqdm import tqdm
 
 import torch
 import pandas as pd
@@ -133,65 +134,62 @@ for directory in os.listdir(ds_root):
                                  'accent':accent,
                                  'gender': gender,
                                  'transcript': transcript})              
+      
 print(len(train_data))
+print(len(val_data))
 print(len(test_data))
 
-device = 'cuda:1'
-
-
-
+device = 'cuda:0'
 class MyDataset(Dataset):
     def __init__(self, raw_data, transform=None, model_name = "openai/whisper-tiny.en"):
         self.data = []
         self.targets = []
         self.transcription = []
+        self.gender = []
         self.MODEL = model_name
         self.processor = WhisperProcessor.from_pretrained(self.MODEL)
         for datapoint in raw_data:
             self.data.append(datapoint['audio'])
             self.targets.append(datapoint['accent'])
             self.transcription.append(datapoint['transcript'])
+            self.gender.append(datapoint['gender'])
         #self.transform = transform
         
     def __getitem__(self, index):
         x,sr = librosa.load(self.data[index],sr=44100)
-        x_s = librosa.resample(x,orig_sr = 44100,target_sr=16000)
+        x_s = torch.tensor(librosa.resample(x,orig_sr = 44100,target_sr=16000))
+        x_s=whisper.pad_or_trim(x_s.flatten()).to(device)
+        x_s = whisper.log_mel_spectrogram(x_s)
         #x = librosa.util.fix_length(x,size=sr*3)
-        #x = librosa.feature.melspectrogram(y=x, sr = sr, n_mels=80)
-        
-        x_s = self.processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features
-        x_3s = x_s[:,:,:300]
-
+        #x_s = librosa.feature.melspectrogram(y=x, sr = sr, n_mels=80)
+        #x_s = np.expand_dims(x_s,0)
+        #x_3s = torch.tensor(x_s[:,:,:300]).to(device)
+        x_3s = torch.unsqueeze(x_s[:,:300],0)
         # for 2d conv
         #x = np.expand_dims(x,axis=0)
         
         d = self.targets[index]
         t = self.transcription[index]
-        t = self.processor.tokenizer(t+'<|endoftext|>').input_ids
-        #t = self.processor.tokenizer.pad(t, return_tensors="pt")
-        #print(t)
-        #aaa
+        g = self.gender[index]
         #trans = self.transcription[index]
         
-        return {#'3second':x_3s, 
-                'input_features':x_s.squeeze(), 
-                #'dialect':d, 
-                'labels':t}
+        return x_3s,x_s,d,t,g#x_3s, x_s.squeeze(), d, t
     def __len__(self):
         return len(self.data)
     
 train_d = MyDataset(train_data)
+val_d = MyDataset(val_data)
 test_d = MyDataset(test_data)
-#_,test_d = random_split(test_d,[0.9,0.1])
+
 #train_d, test_d = random_split(dataset,[0.8,0.2])
-TRAIN = DataLoader(train_d, batch_size=64,drop_last=True,shuffle=True)
-TEST = DataLoader(test_d, batch_size=64,drop_last=True,shuffle=True)
+TRAIN = DataLoader(train_d, batch_size=256,drop_last=True,shuffle=True)
+VAL = DataLoader(val_d, batch_size=256,drop_last=True,shuffle=True)
+TEST = DataLoader(test_d, batch_size=256,drop_last=True,shuffle=True)
 
 print("-----------------------START DATA PROCESSING-----------------------")
 
 
-
-
+EPOCH=10
 
 
 print("----------------------MODEL START--------------------")
@@ -219,10 +217,15 @@ class Net(nn.Module):
         self.conv9 = nn.Conv2d(128, 256, 3,padding=1)
         self.conv10 = nn.Conv2d(256, 256, 3,padding=1)
         self.batchnorm5 = nn.BatchNorm2d(256)
+        #self.conv11 = nn.Conv2d(256, 256, 3,padding=1)
+        #self.conv12 = nn.Conv2d(256, 256, 3,padding=1)
+        #self.batchnorm6 = nn.BatchNorm2d(512)
         #self.avgpool = nn.AvgPool1d(128)
-        self.fc1 = nn.Linear(11520, 512)
-        self.fc2 = nn.Linear(512, 64)
-        self.fc3 = nn.Linear(64, 6)
+        #self.fc1 = nn.Linear(4608, 512)
+        #self.fc1 = nn.Linear(2304, 256)
+        self.fc1_gender = nn.Linear(4608, 256)
+        self.fc2_gender = nn.Linear(256, 64)
+        self.fc3_gender = nn.Linear(64, 2)
         
         #self.lstm = nn.LSTM(1,1024,3)
         #self.fc1 = nn.Linear(1024,256)
@@ -256,7 +259,12 @@ class Net(nn.Module):
         x = self.conv10(x)
         x = F.relu(self.batchnorm5(x))
         x = self.pool(x)
-                
+
+        #x = F.relu(self.conv11(x))
+        #x = self.conv12(x)
+        #x = F.relu(self.batchnorm6(x))
+        #x = self.pool(x)
+                        
         #print(x.shape)
         
         #x = model.encoder(x)
@@ -271,138 +279,126 @@ class Net(nn.Module):
         #x = self.fc3(x)
         
         x = torch.flatten(x, 1) # flatten all dimensions except batch
-        print(x.shape)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        #print(x.shape)
+        x = F.relu(self.fc1_gender(x))
+        x = F.relu(self.fc2_gender(x))
+        x = self.fc3_gender(x)
         return x
 
 
 net = Net()
 print(sum(p.numel() for p in net.parameters() if p.requires_grad))
+PATH_CLASSIFIER = './model/classifier_10layer.pt'
+net.load_state_dict(torch.load(PATH_CLASSIFIER),strict=False)
+
 print(net)
 net.to(device)
 
-# load classifier network
+for param in net.parameters():
+    param.requires_grad = False
+for param in net.fc1_gender.parameters():
+    param.requires_grad = True    
+for param in net.fc2_gender.parameters():
+    param.requires_grad = True    
+for param in net.fc3_gender.parameters():
+    param.requires_grad = True    
+print(sum(p.numel() for p in net.parameters() if p.requires_grad))
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(net.parameters(), lr=1e-4)
 
 
-MODEL = "openai/whisper-tiny.en"
-
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
-
-#model = WhisperForConditionalGeneration.from_pretrained(MODEL, local_files_only=True)
-model = WhisperForConditionalGeneration.from_pretrained(MODEL)
-#model.to(device)
-processor = WhisperProcessor.from_pretrained(MODEL)
-
-def preprocess(data):
-    processed_data = {}
-    processed_data['input_features'] = processor(data["audio"]["array"], sampling_rate=16_000, return_tensors="pt").input_features.to(device)
-    processed_data['decoder_input_ids'] = processor.tokenizer('<|startoftranscript|>'+data['text'].lower(),return_tensors='pt').input_ids.to(device)
-    processed_data['labels'] = processor.tokenizer(data['text'].lower()+'<|endoftext|>',return_tensors='pt').input_ids.to(device)
-    return processed_data
-
-import torch
-
-from dataclasses import dataclass
-from typing import Any, Dict, List, Union
-@dataclass
-class DataCollatorSpeechSeq2SeqWithPadding:
-    processor: Any
-
-    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-        # split inputs and labels since they have to be of different lengths and need different padding methods
-        # first treat the audio inputs by simply returning torch tensors
-        input_features = [{"input_features": feature["input_features"]} for feature in features]
-        batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
-
-        # get the tokenized label sequences
-        label_features = [{"input_ids": feature["labels"]} for feature in features]
+train_loss_trace = []
+val_acc_trace = []
+processor = WhisperProcessor.from_pretrained("openai/whisper-tiny.en")
+for epoch in range(EPOCH):
+    running_loss = 0.0
+    for i, data in tqdm(enumerate(TRAIN, 0)):
+        # get the inputs; data is a list of [inputs, labels]
+        #x_s,labels,trans = data
+        #x_s = processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+        #inputs = x_s[:,:,:300]
+        inputs, _, labels, trans,gender = data
         
-        # pad the labels to max length
-        labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
+        
+        inputs = inputs
+        #print(inputs.shape)
+        labels = gender.to(device)
+        #print(labels)
+        # zero the parameter gradients
+        optimizer.zero_grad()
 
-        # replace padding with -100 to ignore loss correctly
-        labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
+        # forward + backward + optimize
+        #outputs = net(model.encoder(inputs))
 
-        # if bos token is appended in previous tokenization step,
-        # cut bos token here as it's append later anyways
-        if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
-            labels = labels[:, 1:]
+        outputs = net(inputs)
+        
+        #print(outputs.data.shape)
+        #print(labels)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
 
-        batch["labels"] = labels
+        # print statistics
+        running_loss += loss.item()
+    print(f'Running loss of the network on the train: {running_loss}')
+    train_loss_trace.append(running_loss)
+    running_loss=0.0
+    correct = 0
+    total = 0
+    # since we're not training, we don't need to calculate the gradients for our outputs
+    with torch.no_grad():
+        for data in VAL:
+            inputs, _, labels, trans, gender = data
+            #x_s,labels,trans = data
+            #x_s = processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+            #inputs = x_s[:,:,:300]            
+            inputs = inputs
+            labels = gender.to(device)
+            # calculate outputs by running images through the network
+            #outputs = net(model.encoder(images))
+            outputs = net(inputs)
+            # the class with the highest energy is what we choose as prediction
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            
 
-        return batch
-data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
+            correct += (predicted == labels).sum().item()
 
-from peft import prepare_model_for_kbit_training
+    print(f'Accuracy of the network on the val: {100 * correct // total} %')
+    val_acc_trace.append(100 * correct // total)
+print('Finished Training')
+print('training loss curve is:')
+print(train_loss_trace)
+print('val acc curve is:')
+print(val_acc_trace)
+print('Saving weights')
+PATH_CLASSIFIER_gender = './model/classifier_10layer_gender.pt'
+torch.save(net.state_dict(), PATH_CLASSIFIER_gender)
 
-model = prepare_model_for_kbit_training(model)
-def make_inputs_require_grad(module, input, output):
-    output.requires_grad_(True)
+correct = 0
+total = 0
+# since we're not training, we don't need to calculate the gradients for our outputs
+with torch.no_grad():
+    for data in TEST:
+        inputs, _, labels, trans, gender = data
+        #x_s,labels,trans = data
+        #x_s = processor(x_s, sampling_rate=16_000, return_tensors="pt").input_features.to(device)
+        #inputs = x_s[:,:,:300]        
+        inputs = inputs
+        labels = gender.to(device)
+        # calculate outputs by running images through the network
+        outputs = net(inputs)
+        # the class with the highest energy is what we choose as prediction
+        _, predicted = torch.max(outputs.data, 1)
+        total += labels.size(0)
+        
+        #print(predicted)
 
-model.model.encoder.conv1.register_forward_hook(make_inputs_require_grad)
-from peft import LoraConfig, PeftModel, LoraModel, LoraConfig, get_peft_model
+        correct += (predicted == labels).sum().item()
 
-config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
-
-model = get_peft_model(model, config)
-model.print_trainable_parameters()
-
-from transformers import Seq2SeqTrainingArguments
-
-training_args = Seq2SeqTrainingArguments(
-    output_dir="./model/lora/base5e-5",  # change to a repo name of your choice
-    per_device_train_batch_size=8,
-    gradient_accumulation_steps=1,  # increase by 2x for every 2x decrease in batch size
-    learning_rate=5e-5,
-    warmup_steps=50,
-    num_train_epochs=3,
-    evaluation_strategy="steps",
-    save_strategy="epoch",
-    fp16=True,
-    per_device_eval_batch_size=8,
-    generation_max_length=128,
-    logging_steps=100,
-#    max_steps=100, # only for testing purposes, remove this from your final run :)
-    remove_unused_columns=False,  # required as the PeftModel forward doesn't have the signature of the wrapped model's forward
-    label_names=["labels"],  # same reason as above
-)
-
-from transformers import Seq2SeqTrainer, TrainerCallback, TrainingArguments, TrainerState, TrainerControl
-from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
-
-# This callback helps to save only the adapter weights and remove the base model weights.
-class SavePeftModelCallback(TrainerCallback):
-    def on_save(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
-        checkpoint_folder = os.path.join(args.output_dir, f"{PREFIX_CHECKPOINT_DIR}-{state.global_step}")
-
-        peft_model_path = os.path.join(checkpoint_folder, "adapter_model")
-        kwargs["model"].save_pretrained(peft_model_path)
-
-        pytorch_model_path = os.path.join(checkpoint_folder, "pytorch_model.bin")
-        if os.path.exists(pytorch_model_path):
-            os.remove(pytorch_model_path)
-        return control
+print(f'Accuracy of the network on the test: {100 * correct // total} %')
 
 
-trainer = Seq2SeqTrainer(
-    args=training_args,
-    model=model,
-    train_dataset=train_d,
-    eval_dataset=test_d,
-    data_collator=data_collator,
-    tokenizer=processor.feature_extractor,
-    callbacks=[SavePeftModelCallback],
-)
-model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
-trainer.train()
 
 
 
